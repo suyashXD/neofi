@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
+    email = serializers.EmailField(required=True)  # Add email field with validation
 
     class Meta:
         model = User
