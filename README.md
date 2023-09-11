@@ -3,7 +3,7 @@
 ## Description
 
 Chatapp is a chat application created using Django that allows users to create accounts, login, view online users, start chats with online users, and restrict sending messages to offline users.
-
+<br>
 Note: This is only the backend and for api endpoint implementation and testing, tested on curl and postman, works on both.
 
 ## Prerequisites
