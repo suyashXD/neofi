@@ -1,144 +1,168 @@
-from django.contrib.auth.views import LoginView
-from django.views.generic.edit import CreateView
-from django.urls import reverse_lazy
-from .forms import CustomUserCreationForm
-
-from rest_framework.decorators import api_view
+from .serializers import *
 from rest_framework.response import Response
+from rest_framework import permissions
+from rest_framework.authtoken.serializers import AuthTokenSerializer
+from knox.auth import AuthToken
 from rest_framework import status
-from .serializers import UserRegistrationSerializer, UserLoginSerializer
-
-from rest_framework.authtoken.views import ObtainAuthToken
-from rest_framework.authtoken.models import Token
-from .models import UserProfile
-from .serializers import UserProfileSerializer
-
-from django.contrib.auth.models import User
-from rest_framework import serializers
-from .models import ChatSession, Message
-
-
-class CustomLoginView(LoginView):
-    template_name = 'registration/login.html'
+from rest_framework import viewsets
+from django.contrib.auth import get_user_model
+from rest_framework.views import APIView
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
+from django.http import JsonResponse
+import json
+import os
+User = get_user_model()
 
 
-class CustomUserCreationView(CreateView):
-    form_class = CustomUserCreationForm
-    template_name = 'registration/registration_form.html'
-    success_url = reverse_lazy('login')
+class RegisterView(APIView):
+
+    def post(self, request):
+        serializer = RegisterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        user = serializer.save()
+        _, token = AuthToken.objects.create(user)
+
+        return Response({
+            'user_info':{
+                'id': user.id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'email': user.email
+            },
+            'token': token,
+            'message': 'User created successfully'
+        },
+        status=status.HTTP_200_OK
+        )
 
 
-@api_view(['POST'])
-def user_registration_view(request):
-    if request.method == 'POST':
-        serializer = UserRegistrationSerializer(data=request.data)
-        if serializer.is_valid():
-            user = serializer.save()
-            user.set_password(request.data['password'])
-            user.save()
-            return Response({'message': 'User registered successfully'}, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class LoginView(APIView):
+    
+    def post(self, request):
+        serializer = AuthTokenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        user = serializer.validated_data['user']
+        _, token = AuthToken.objects.create(user)
+
+        return Response({
+            'user_info':{
+                'id': user.id,
+                'username': user.username,
+                'email': user.email
+            },
+            'token': token,
+            'message': 'Login Successful'
+        },
+        status=status.HTTP_200_OK
+        )
 
 
-class UserLoginView(ObtainAuthToken):
-    serializer_class = UserLoginSerializer
+class GetOnlineUsers(viewsets.ModelViewSet):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserSerializer
+    queryset = User.objects.all()
+    
+    def get_queryset(self):
 
-    def post(self, request, *args, **kwargs):
-        serializer = self.serializer_class(data=request.data, context={'request': request})
-        if serializer.is_valid():
-            user = serializer.validated_data['user']
-            token, created = Token.objects.get_or_create(user=user)
-            return Response({'token': token.key, 'user_id': user.id}, status=status.HTTP_200_OK)
-        return Response({'message': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
-
-
-@api_view(['GET'])
-def get_user_by_username_view(request, username):
-    if request.method == 'GET':
-        user = User.objects.filter(username=username).first()
-
-        if user is not None:
-            return Response(user.to_json(), status=status.HTTP_200_OK)
+        online_users = self.queryset.filter(status='online')
+        if online_users:
+            return online_users
         else:
-            return Response({'message': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'message':'No online user found'}, status=status.HTTP_400_BAD_REQUEST)
+        
 
+class ChatStartView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
 
-@api_view(['GET'])
-def get_chat_session_by_ids_view(request, sender_id, recipient_id):
-    if request.method == 'GET':
-        chat_session = ChatSession.objects.filter(sender_id=sender_id, recipient_id=recipient_id).first()
+    def post(self, request):
+        message = request.data.get('message')
+        sender = request.user.username
+        receiver = request.data.get('receiver')
 
-        if chat_session is not None:
-            return Response(chat_session.to_json(), status=status.HTTP_200_OK)
-        else:
-            return Response({'message': 'Chat session not found'}, status=status.HTTP_404_NOT_FOUND)
+        # Check the status of the receiver
+        try:
+            receiver_user = User.objects.get(username=receiver)
+            if receiver_user.status == 'online':
+                
+                return Response({'status': 'success', 'message': message, 'sender': sender, 'receiver': receiver_user.username})
+            else:
+                return Response({'status': 'error', 'message': 'Receiver is offline'})
+            
+        except User.DoesNotExist:
 
+            return Response({'status': 'error', 'message': 'Receiver not found'})
+        
 
-@api_view(['GET'])
-def get_messages_by_chat_session_id_view(request, chat_session_id):
-    if request.method == 'GET':
-        messages = Message.objects.filter(chat_session_id=chat_session_id).order_by('-timestamp')
+class ChatSendView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
 
-        return Response([message.to_json() for message in messages], status=status.HTTP_200_OK)
+    def post(self, request):
+        recipient = request.data.get('receiver')
+        message = request.data.get('message')
 
+        recipient_obj = User.objects.filter(username=recipient).first()
 
+        if not recipient_obj:
+            return Response({'status': 'error', 'message': 'User does not exists'})
 
+        # Check if recipient is online
+        if recipient_obj.status == 'online':
+            channel_layer = get_channel_layer()
+            # Send message to recipient
+            async_to_sync(channel_layer.group_send)(
+                f'chat_{recipient}',
+                {
+                    'type': 'chat_message',
+                    'message': message
+                }
+            )
+            return Response({'status': 'success', 'message': 'Message sent successfully'})
 
-@api_view(['GET'])
-def get_online_users_view(request):
-    if request.method == 'GET':
-        online_users = UserProfile.objects.filter(is_online=True)
-        serializer = UserProfileSerializer(online_users, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response({'status': 'error', 'message': 'Recipient is offline'})
+    
 
+    
+class SuggestedFriendsView(APIView):
+    def get(self, request, user_id):
+        
+        current_directory = os.path.dirname(os.path.abspath(__file__))
 
-@api_view(['POST'])
-def start_chat_view(request):
-    if request.method == 'POST':
-        sender_id = request.data['sender_id']
-        recipient_id = request.data['recipient_id']
+        # Navigate up one directory to the parent directory of chatapp and then into the data directory
+        file_path = os.path.join(current_directory, '..', 'data', 'users.json')
+        
+        # Load user data from the JSON file
+        with open(file_path) as json_file:
+            user_data = json.load(json_file)
 
-        # Check if both users are online
-        sender_is_online = UserProfile.objects.get(id=sender_id).is_online
-        recipient_is_online = UserProfile.objects.get(id=recipient_id).is_online
+        # Iterate over (Used for performance aspect)
+        user = next((user for user in user_data['users'] if user['id'] == user_id))
+        
+        if not user:
+            return JsonResponse({'error': 'User not found'}, status=404)
+        
+        # Calculate similarity scores for each user and sort them in descending order
+        suggested_friends = []
+        for other_user in user_data['users']:
+            if other_user['id'] != user_id:
+                similarity_score = calculate_similarity(user, other_user)
+                suggested_friends.append((other_user, similarity_score))
+        
+        suggested_friends = sorted(suggested_friends, key=lambda x: x[1], reverse=True)
+        
+        # Get the top 5 recommended friends
+        top_5_friends = [friend[0] for friend in suggested_friends[:5]]
+        
+        return JsonResponse({'suggested_friends': top_5_friends})
 
-        if sender_is_online and recipient_is_online:
-            # Create a new chat session and start the chat
-            chat_session = ChatSession.objects.create(sender_id=sender_id, recipient_id=recipient_id)
-            return Response({'message': 'Chat started successfully'}, status=status.HTTP_200_OK)
-        else:
-            # Return an error message if either user is offline
-            if not sender_is_online:
-                return Response({'message': 'Sender is offline'}, status=status.HTTP_400_BAD_REQUEST)
-            elif not recipient_is_online:
-                return Response({'message': 'Recipient is offline'}, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['POST'])
-def send_message_view(request):
-    if request.method == 'POST':
-        sender_id = request.data['sender_id']
-        recipient_id = request.data['recipient_id']
-        message_content = request.data['message_content']
-
-        # Check if the recipient is online
-        recipient_is_online = UserProfile.objects.get(id=recipient_id).is_online
-
-        if recipient_is_online:
-            # Save the message in the database
-            Message.objects.create(sender_id=sender_id, recipient_id=recipient_id, content=message_content)
-            return Response({'message': 'Message sent successfully'}, status=status.HTTP_200_OK)
-        else:
-            # Return an error message if the recipient is offline
-            return Response({'message': 'Recipient is offline'}, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['GET'])
-def recommended_friends_view(request, user_id):
-    if request.method == 'GET':
-        # Implement your recommendation algorithm to find recommended friends for the user
-        # You can use the provided JSON file to fetch user data
-        # Return a list of recommended friends based on your algorithm
-        # For example, you can return the top 5 recommended friends
-        recommended_friends = []  # Implement logic to fetch recommended friends
-        return Response(recommended_friends, status=status.HTTP_200_OK)
+def calculate_similarity(user1, user2):
+    similarity_score = 0
+    for interest in user1['interests']:
+        if interest in user2['interests']:
+            similarity_score += abs(user1['interests'][interest] - user2['interests'][interest])
+    
+    return similarity_score
