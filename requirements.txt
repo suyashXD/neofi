@@ -5,3 +5,4 @@ django_channels==0.7.0
 django_rest_knox==4.2.0
 djangorestframework==3.14.0
 websockets==11.0.3
+pytest==7.4.2
