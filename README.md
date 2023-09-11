@@ -71,3 +71,10 @@ To get a list of suggested friends for a user, make a GET request to the suggest
 curl -H "Authorization: <Token your-auth-token>" http://127.0.0.1:8000/api/suggested-friends/<your-user-id>/
 ```
 
+### API Endpoint Testing
+
+For automated testing of API Endpoints, make suitable changes in the tests directory and run:
+```
+pytest tests/
+```
+
