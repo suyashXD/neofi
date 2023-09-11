@@ -49,31 +49,36 @@ class LoginView(APIView):
         user = serializer.validated_data['user']
         _, token = AuthToken.objects.create(user)
 
+        # Set the user's status to "online"
+        user.status = 'online'
+        user.save()
+
         return Response({
-            'user_info':{
+            'user_info': {
                 'id': user.id,
                 'username': user.username,
                 'email': user.email
             },
             'token': token,
             'message': 'Login Successful'
-        },
-        status=status.HTTP_200_OK
-        )
+        }, status=status.HTTP_200_OK)
 
 
-class GetOnlineUsers(viewsets.ModelViewSet):
+from rest_framework.generics import ListAPIView
+from rest_framework import permissions, status
+from rest_framework.response import Response
+
+class GetOnlineUsers(ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = UserSerializer
-    queryset = User.objects.all()
-    
-    def get_queryset(self):
 
-        online_users = self.queryset.filter(status='online')
-        if online_users:
-            return online_users
-        else:
-            return Response({'message':'No online user found'}, status=status.HTTP_400_BAD_REQUEST)
+    def get_queryset(self):
+        return User.objects.filter(status='online')
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
         
 
 class ChatStartView(APIView):
